@@ -1,0 +1,138 @@
+openapi: 3.0.0
+info:
+  title: Task Processing API
+  description: This API allows for the creation and tracking of tasks that will be processed by background workers.
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:8086
+paths:
+  /tasks:
+    post:
+      summary: Create a new task
+      description: This API will create tasks that will be processed by the background workers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  description: Name of the task
+                  example: task_name_1
+                type:
+                  type: string
+                  description: Type of the task
+                  enum:
+                    - send_email
+                    - run_query
+                  example: send_email
+                priority:
+                  type: string
+                  description: Priority of the task
+                  enum:
+                    - high
+                    - normal
+                    - low
+                  example: normal
+                payload:
+                  type: string
+                  description: Payload of the task in JSON format
+                  example: '{"param1":"value1"}'
+      responses:
+        '200':
+          description: Successfully created the task
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added_task_id:
+                    type: integer
+                    description: The ID of the created task
+                    example: 1
+  /tasks/{id}:
+    get:
+      summary: Get task status
+      description: This API will return the status history of the task with the given ID.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: The ID of the task
+          example: 1
+      responses:
+        '200':
+          description: Successfully retrieved the task status history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    description: The old status of the task
+                    enum:
+                      - queued
+                      - running
+                      - failed
+                      - succeeded
+                    example: queued
+  /tasks/{id}/history:
+    get:
+      summary: Get task history
+      description: This API will return the history of the tasks.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+          description: The ID of the task
+          example: 1
+      responses:
+        '200':
+          description: Successfully retrieved the task history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                    description: The ID of the task
+                    example: 1
+                  history:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        task_id:
+                          type: integer
+                          description: The ID of the task
+                          example: 3
+                        old_status:
+                          type: string
+                          description: The old status of the task
+                          enum:
+                            - queued
+                            - running
+                            - failed
+                            - succeeded
+                          example: queued
+                        new_status:
+                          type: string
+                          description: The new status of the task
+                          enum:
+                            - queued
+                            - running
+                            - failed
+                            - succeeded
+                          example: running
+                        created_at_stamp:
+                          type: integer
+                          description: The timestamp when the status change occurred
+                          example: 1723119959

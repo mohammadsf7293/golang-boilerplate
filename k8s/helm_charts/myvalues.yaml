@@ -1,0 +1,150 @@
+# Default values for deployment.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+app:
+  version: v2024.08.11-115105-a8abc05
+  port: 8086
+  protocol: TCP
+
+replicaCount: 1
+
+image:
+  repository: task-manager
+  pullPolicy: IfNotPresent
+  command: ["/bin/server"]
+  args: ""
+
+env:
+  fromConfigmap:
+    enabled: true
+    data:
+      SERVER_PORT: 8086
+      SERVER_TIME_OUT_IN_SECONDS: 5
+      WORKER_TIME_OUT_IN_SECONDS: 15
+
+      DB_HOST: my-release-postgresql
+      DB_PORT: 5432
+      DB_DATABASE: postgres
+      DB_DATABASE_TEST: postgres_test
+      DB_USERNAME: postgres
+      DB_PASSWORD: dS9hBzXaKq
+      DB_SSL_MODE: disable
+      DB_POOL_MAX_CONNS: 30
+
+      RABBIT_USERNAME: user
+      RABBIT_PASSWORD: wRRynukCAgf76Jxj
+      RABBIT_HOST: my-rabbit-rabbitmq
+      RABBIT_PORT: 5672
+      HIGH_PRIORITY_JOBS_QUEUE_NAME: jobs_high
+      NORMAL_PRIORITY_JOBS_QUEUE_NAME: jobs_normal
+      LOW_PRIORITY_JOBS_QUEUE_NAME: jobs_low
+      TEST_JOBS_QUEUE_NAME: jobs_test
+
+      REDIS_USERNAME: ""
+      REDIS_PASSWORD: "iGHjvkmqly"
+      REDIS_HOST: my-redis-master
+      REDIS_PORT: 6379
+      REDIS_DB_INDEX: 0
+  fromSecret:
+    enabled: false
+    data: {}
+
+restartPolicy: Always
+existingSecret: mysecret
+
+imagePullSecrets: []
+nameOverride: "myapp"
+fullnameOverride: ""
+
+serviceMonitor:
+  enabled: false
+  namespace: kube-monit
+  interval: 10s
+  scrapeTimeout: 10s
+  selector:
+    prometheus: kube-prometheus
+    release: prometheus
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext: {}
+# fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+# runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8086
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+  # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: chart-example.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+
+
+readinessProbe:
+  enabled: true
+  path: "/readiness"
+  initialDelaySeconds: 10
+  periodSeconds: 120
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+livenessProbe:
+  enabled: true
+  path: "/liveness"
+  initialDelaySeconds: 10
+  periodSeconds: 120
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+#   memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -1,0 +1,13 @@
+{{- if .Values.env.fromConfigmap.enabled }}
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: {{ include "deployment.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "deployment.labels" . | nindent 4 }}
+data:
+    {{- range $key, $value := .Values.env.fromConfigmap.data }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end}}
+{{- end}}

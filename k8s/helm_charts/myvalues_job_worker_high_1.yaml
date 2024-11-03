@@ -1,0 +1,6 @@
+nameOverride: "myapp-worker-high-1"
+image:
+  repository: task-manager
+  pullPolicy: IfNotPresent
+  command: ["/bin/job_worker"]
+  args: ["high", "1"]
