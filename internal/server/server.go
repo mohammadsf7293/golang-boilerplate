@@ -3,8 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"github.com/sf7293/task-manager/internal/domain"
-	"github.com/sf7293/task-manager/internal/errval"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/errval"
 	"log/slog"
 )
 

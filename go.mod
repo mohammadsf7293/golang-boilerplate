@@ -1,4 +1,4 @@
-module github.com/sf7293/task-manager
+module github.com/mohammadsf7293/golang-boilerplate
 
 go 1.22.4
 

@@ -2,9 +2,9 @@ package process
 
 import (
 	"errors"
-	"github.com/sf7293/task-manager/internal/domain"
-	"github.com/sf7293/task-manager/pkg/email"
-	"github.com/sf7293/task-manager/pkg/query"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
+	"github.com/mohammadsf7293/golang-boilerplate/pkg/email"
+	"github.com/mohammadsf7293/golang-boilerplate/pkg/query"
 	"math/rand"
 	"time"
 )
