@@ -1,7 +1,6 @@
-![taskflow logo](assets/taskflow-logo.webp)
 
-# Taskflow
-This project serves as a template for managing and processing tasks using background workers, with tasks stored in a database. While the tasks provided are placeholders within the pkg folder, they demonstrate how you can implement similar functionality in your own projects.
+# About
+This project serves as a boilerplate for managing and processing tasks using background workers, with tasks stored in a database. While the tasks provided are placeholders within the pkg folder, they demonstrate how you can implement similar functionality in your own projects.
 For instance, the project includes sample tasks like send email and run query. These tasks are intentionally simplified—they merely simulate activity by running a sleep function and occasionally failing. The failures are deliberate, allowing you to explore error handling and implement retries when necessary.
 
 This is a sample project designed to be run locally. My goal in creating this repository is to provide a code template that:
@@ -63,7 +62,7 @@ I have used 4 queues:
 - A queue for tasks with `low` priority
 - A queue for `integration testing` which won't be used on production
 
-Why RabbitMQ?
+## Why RabbitMQ?
 
 I have worked with `Redis` queues in high loads, and it's not efficient in high loads, Also I thought that using `Kafka` would be considered as over-engineering for this case. So, I preferred to use `Rabbit Pub/Sub`.
 
