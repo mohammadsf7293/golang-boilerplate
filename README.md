@@ -4,9 +4,9 @@ This project serves as a boilerplate for managing and processing tasks using bac
 For instance, the project includes sample tasks like send email and run query. These tasks are intentionally simplified—they merely simulate activity by running a sleep function and occasionally failing. The failures are deliberate, allowing you to explore error handling and implement retries when necessary.
 
 This is a sample project designed to be run locally. My goal in creating this repository is to provide a code template that:
-Aligns with the [Go project layout standards](https://github.com/golang-standards/project-layout/)
-Incorporates best practices and up-to-date libraries
-Serves as a solid starting point for those looking to create a new project and in need of a reliable boilerplate.
+- Aligns with the [Go project layout standards](https://github.com/golang-standards/project-layout/)
+- Incorporates best practices and up-to-date libraries
+- Serves as a solid starting point for those looking to create a new project and in need of a reliable boilerplate.
 
 ## Notes
 - There is a simple Docker Compose file included that contains a database to work against.
