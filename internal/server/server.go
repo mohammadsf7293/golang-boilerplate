@@ -3,23 +3,23 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+
 	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
 	"github.com/mohammadsf7293/golang-boilerplate/internal/errval"
-	"log/slog"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/metrics"
 )
 
 type ServerLogic struct {
 	storage                     domain.Storage
-	queueClient                 domain.Queue
 	highPriorityJobsQueueName   string
 	normalPriorityJobsQueueName string
 	lowPriorityJobsQueueName    string
 }
 
-func NewServerLogic(storage domain.Storage, queueClient domain.Queue, highPriorityJobsQueueName, normalJobsQueueName, lowPriorityJobsQueueName string) *ServerLogic {
+func NewServerLogic(storage domain.Storage, highPriorityJobsQueueName, normalJobsQueueName, lowPriorityJobsQueueName string) *ServerLogic {
 	return &ServerLogic{
 		storage:                     storage,
-		queueClient:                 queueClient,
 		highPriorityJobsQueueName:   highPriorityJobsQueueName,
 		normalPriorityJobsQueueName: normalJobsQueueName,
 		lowPriorityJobsQueueName:    lowPriorityJobsQueueName,
@@ -29,26 +29,13 @@ func NewServerLogic(storage domain.Storage, queueClient domain.Queue, highPriori
 func (s *ServerLogic) AddTask(ctx context.Context, req domain.RouterRequestAddTask) (taskID int32, err error) {
 	marshalledPayload, err := json.Marshal(req.Payload)
 	if err != nil {
-		slog.Error("error while marshalling request payload", "err", err.Error())
+		slog.ErrorContext(ctx, "error while marshalling request payload", "err", err.Error())
 		return -1, errval.ErrInternal
 	}
 
 	taskPriority := string(domain.Normal)
 	if req.TaskPriority != nil {
 		taskPriority = *req.TaskPriority
-	}
-
-	task, err := s.storage.InsertTask(ctx, req.Name, req.TaskType, string(domain.Queued), taskPriority, string(marshalledPayload))
-	if err != nil {
-		slog.ErrorContext(ctx, "error occurred while calling storage.InsertTask", "error", err)
-		return -1, errval.ErrInternal
-	}
-
-	marshalledTask, err := json.Marshal(task)
-	if err != nil {
-		slog.Error("There was an error in marshalling newly created task", "error", err.Error())
-		// I've ignored returning the error here and just log it because I'll handle re-queueing task again in another worker
-		return task.ID, nil
 	}
 
 	queueName := s.normalPriorityJobsQueueName
@@ -58,12 +45,15 @@ func (s *ServerLogic) AddTask(ctx context.Context, req domain.RouterRequestAddTa
 	case string(domain.Low):
 		queueName = s.lowPriorityJobsQueueName
 	}
-	err = s.queueClient.PublishMessage(queueName, string(marshalledTask))
+
+	task, messageID, err := s.storage.InsertTaskWithOutbox(ctx, req.Name, req.TaskType, string(domain.Queued), taskPriority, string(marshalledPayload), queueName)
 	if err != nil {
-		slog.Error("Error occurred while queuing marshalled task to jobs queue", "error", err.Error())
-		// Again I've ignored returning the error here and just log it because I'll handle re-queueing task again in another worker
+		slog.ErrorContext(ctx, "error occurred while calling storage.InsertTaskWithOutbox", "error", err)
+		return -1, errval.ErrInternal
 	}
 
+	metrics.TasksCreatedTotal.Inc()
+	slog.InfoContext(ctx, "task created and written to outbox", "task_id", task.ID, "message_id", messageID, "queue", queueName)
 	return task.ID, nil
 }
 
@@ -71,7 +61,7 @@ func (s *ServerLogic) GetTaskStatus(ctx context.Context, taskID int32) (status s
 	task, err := s.storage.GetTaskByID(ctx, taskID)
 	if err != nil {
 		if err == errval.ErrNotFound {
-			slog.Info("task not found with the given id", "id", taskID)
+			slog.InfoContext(ctx, "task not found with the given id", "id", taskID)
 			return "", err
 		}
 
@@ -86,7 +76,7 @@ func (s *ServerLogic) GetTaskStatusHistory(ctx context.Context, taskID int32) (h
 	taskHistory, err := s.storage.GetTaskStatusChangeHistory(ctx, taskID)
 	if err != nil {
 		if err == errval.ErrNotFound {
-			slog.Info("history not found for the given task id", "task_id", taskID)
+			slog.InfoContext(ctx, "history not found for the given task id", "task_id", taskID)
 			return nil, err
 		}
 

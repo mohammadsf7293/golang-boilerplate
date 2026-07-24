@@ -4,18 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
-	"github.com/go-playground/validator/v10"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
-	"github.com/mohammadsf7293/golang-boilerplate/configs"
-	db2 "github.com/mohammadsf7293/golang-boilerplate/db"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/errval"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/postgres"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/rabbitmq"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/server"
 	"log"
 	"log/slog"
 	"net/http"
@@ -24,6 +12,22 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+	"github.com/go-playground/validator/v10"
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/mohammadsf7293/golang-boilerplate/configs"
+	db2 "github.com/mohammadsf7293/golang-boilerplate/db"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/errval"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/outbox"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/postgres"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/rabbitmq"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/server"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/server/middleware"
 
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -53,8 +57,7 @@ func main() {
 	}
 	slog.Info("Migrations ran successfully")
 
-	// Setting up a context with cfg.ServerTimeOutInSeconds seconds time out, which limits the request process time with a timeout of cfg.ServerTimeOutInSeconds seconds
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ServerTimeOutInSeconds)*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	storage, err := postgres.NewStorage(ctx, cfg.Database.ToDbConnectionUri())
@@ -65,13 +68,17 @@ func main() {
 	slog.Info("Postgres connection has been initialized successfully")
 
 	mainQueueNames := cfg.RabbitMQ.GetMainQueueNames()
-	rabbitClient, err := rabbitmq.NewRabbitMQClient(ctx, cfg.RabbitMQ.ToRabbitConnectionUri(), mainQueueNames)
+	rabbitClient, err := rabbitmq.NewRabbitMQClient(ctx, cfg.RabbitMQ.ToRabbitConnectionUri(), mainQueueNames, rabbitmq.ClientOptions{
+		PrefetchCount: cfg.RabbitPrefetchCount,
+		DLXName:       cfg.RabbitMQ.DeadLetterExchange,
+		DLQName:       cfg.RabbitMQ.DeadLetterQueueName,
+		MaxRetries:    cfg.RabbitMaxRetries,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
-		err = rabbitClient.Close()
-		if err != nil {
+		if err := rabbitClient.Close(); err != nil {
 			slog.Error("An error occurred while closing RabbitMQ connection", "error", err.Error())
 		}
 	}()
@@ -81,18 +88,15 @@ func main() {
 	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(slog.New(h))
 
-	// Set up a channel to handle exit signals
-	exitChan := make(chan os.Signal, 1)
-	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
+	relay := outbox.NewRelay(storage, rabbitClient, cfg.OutboxBatchSize, time.Duration(cfg.OutboxPollIntervalMs)*time.Millisecond)
+	go relay.Run(ctx)
 
-	router := setupHTTPServer(storage, rabbitClient, cfg.RabbitMQ.HighPriorityJobsQueueName, cfg.RabbitMQ.NormalPriorityJobsQueueName, cfg.RabbitMQ.LowPriorityJobsQueueName)
+	router := setupHTTPServer(storage, rabbitClient, cfg)
 	srv := &http.Server{
 		Addr:    ":" + cfg.ServerPort,
 		Handler: router,
 	}
 
-	// Initializing the server in a goroutine so that
-	// it won't block the graceful shutdown handling below
 	go func() {
 		log.Printf("Starting server on port %s\n", cfg.ServerPort)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -104,47 +108,46 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server...")
-	if err := srv.Shutdown(ctx); err != nil {
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.ServerTimeOutInSeconds)*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
 	}
 
 	log.Println("Server exiting")
 }
 
-func setupHTTPServer(storage domain.Storage, rabbitClient *rabbitmq.RabbitMQClient, rabbitHighPriorityJobsQueueName, rabbitNormalPriorityJobsQueueName, rabbitLowPriorityJobsQueueName string) *gin.Engine {
+func setupHTTPServer(storage domain.Storage, rabbitClient *rabbitmq.RabbitMQClient, cfg *configs.Config) *gin.Engine {
 	r := gin.Default()
+	r.Use(middleware.RequestID())
+
 	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
-		err := v.RegisterValidation("validate_task_type", validateTaskType)
-		if err != nil {
+		if err := v.RegisterValidation("validate_task_type", validateTaskType); err != nil {
 			log.Fatal("failed to bind validation rule of validate_task_type")
 		}
-
-		err = v.RegisterValidation("validate_priority", validatePriority)
-		if err != nil {
+		if err := v.RegisterValidation("validate_priority", validatePriority); err != nil {
 			log.Fatal("failed to bind validation rule of validate_priority")
 		}
-
-		err = v.RegisterValidation("validate_payload", validatePayload)
-		if err != nil {
+		if err := v.RegisterValidation("validate_payload", validatePayload); err != nil {
 			log.Fatal("failed to bind validation rule of validate_payload")
 		}
 	}
 
-	serverLogic := server.NewServerLogic(storage, rabbitClient, rabbitHighPriorityJobsQueueName, rabbitNormalPriorityJobsQueueName, rabbitLowPriorityJobsQueueName)
+	serverLogic := server.NewServerLogic(storage, cfg.RabbitMQ.HighPriorityJobsQueueName, cfg.RabbitMQ.NormalPriorityJobsQueueName, cfg.RabbitMQ.LowPriorityJobsQueueName)
 	tasks := r.Group("/tasks")
 	tasks.POST("", func(c *gin.Context) {
 		req := domain.RouterRequestAddTask{}
-		// Request binding and validation
-		err := c.ShouldBindBodyWith(&req, binding.JSON)
-		if err != nil {
-			slog.Error("error occurred while binding request", "error", err)
-			c.JSON(http.StatusBadRequest, gin.H{})
+		if err := c.ShouldBindBodyWith(&req, binding.JSON); err != nil {
+			slog.Error("error occurred while binding request", "error", err, "request_id", middleware.GetRequestID(c))
+			middleware.BadRequest(c, "invalid request body")
 			return
 		}
 
-		addedTaskID, err := serverLogic.AddTask(c, req)
+		addedTaskID, err := serverLogic.AddTask(c.Request.Context(), req)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err})
+			middleware.InternalError(c, err.Error())
 			return
 		}
 
@@ -155,19 +158,18 @@ func setupHTTPServer(storage domain.Storage, rabbitClient *rabbitmq.RabbitMQClie
 		idStr := c.Param("id")
 		id, err := strconv.ParseInt(idStr, 10, 64)
 		if err != nil {
-			slog.Error("Invalid id parameter, error occurred while casting id str to int", "error", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+			slog.Error("Invalid id parameter", "error", err, "request_id", middleware.GetRequestID(c))
+			middleware.BadRequest(c, "Invalid id")
 			return
 		}
 
-		taskStatus, err := serverLogic.GetTaskStatus(c, int32(id))
+		taskStatus, err := serverLogic.GetTaskStatus(c.Request.Context(), int32(id))
 		if err != nil {
 			if err == errval.ErrNotFound {
-				c.JSON(http.StatusNotFound, gin.H{})
+				middleware.NotFound(c, "task not found")
 				return
 			}
-
-			c.JSON(http.StatusInternalServerError, gin.H{})
+			middleware.InternalError(c, "internal server error")
 			return
 		}
 
@@ -178,19 +180,18 @@ func setupHTTPServer(storage domain.Storage, rabbitClient *rabbitmq.RabbitMQClie
 		idStr := c.Param("id")
 		id, err := strconv.ParseInt(idStr, 10, 64)
 		if err != nil {
-			slog.Error("Invalid id parameter, error occurred while casting id str to int", "error", err)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid id"})
+			slog.Error("Invalid id parameter", "error", err, "request_id", middleware.GetRequestID(c))
+			middleware.BadRequest(c, "Invalid id")
 			return
 		}
 
-		taskHistory, err := serverLogic.GetTaskStatusHistory(c, int32(id))
+		taskHistory, err := serverLogic.GetTaskStatusHistory(c.Request.Context(), int32(id))
 		if err != nil {
 			if err == errval.ErrNotFound {
-				c.JSON(http.StatusNotFound, gin.H{})
+				middleware.NotFound(c, "history not found")
 				return
 			}
-
-			c.JSON(http.StatusInternalServerError, gin.H{})
+			middleware.InternalError(c, "internal server error")
 			return
 		}
 
@@ -200,21 +201,18 @@ func setupHTTPServer(storage domain.Storage, rabbitClient *rabbitmq.RabbitMQClie
 	r.GET("/readiness", func(c *gin.Context) {
 		if postgresIsReady && rabbitIsReady {
 			c.JSON(http.StatusOK, gin.H{"status": "ready"})
-		} else {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready"})
+			return
 		}
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready"})
 	})
 	r.GET("/liveness", func(c *gin.Context) {
-		// Checking health of depending upon infra connections
-		err := storage.Ping(c)
-		if err != nil {
+		if err := storage.Ping(c.Request.Context()); err != nil {
 			slog.Error("Postgresql seem not to be pingable in liveness API", "error", err.Error())
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not healthy"})
 			return
 		}
 
-		isRabbitHealthy := rabbitClient.IsHealthy()
-		if !isRabbitHealthy {
+		if !rabbitClient.IsHealthy() {
 			slog.Error("Rabbit is not healthy")
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not healthy"})
 			return
@@ -222,6 +220,10 @@ func setupHTTPServer(storage domain.Storage, rabbitClient *rabbitmq.RabbitMQClie
 
 		c.JSON(http.StatusOK, gin.H{"status": "up"})
 	})
+
+	if cfg.MetricsEnabled {
+		r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	}
 
 	return r
 }
@@ -249,7 +251,6 @@ var validatePayload validator.Func = func(fl validator.FieldLevel) bool {
 		return false
 	}
 
-	// If map must not be empty, uncomment the following rule
 	if len(unmarshalledPayload) == 0 {
 		return false
 	}

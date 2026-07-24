@@ -1,5 +1,5 @@
 # Use the official Golang image to create a build artifact.
-FROM golang:1.22 AS builder
+FROM golang:1.25.1 AS builder
 
 # Create and change to the app directory.
 WORKDIR /app
@@ -17,7 +17,7 @@ COPY . .
 RUN make build
 
 # Use a leaner image for running the application
-FROM alpine:latest
+FROM alpine:3.20
 
 # Install ca-certificates to allow communication with https endpoints
 RUN apk --no-cache add ca-certificates

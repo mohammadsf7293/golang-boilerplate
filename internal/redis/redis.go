@@ -14,7 +14,7 @@ type Client struct {
 func NewClient(ctx context.Context, dsn string) (*Client, error) {
 	opts, err := redis.ParseURL(dsn)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	redisClient := redis.NewClient(opts)

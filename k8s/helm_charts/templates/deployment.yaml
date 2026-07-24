@@ -43,12 +43,12 @@ spec:
           env:
             {{- $root := . -}}
             {{- range $key, $val := .Values.env.fromSecret.data }}
-          - name: {{ $key }}
-            valueFrom:
-              secretKeyRef:
-                name: {{ if $root.Values.existingSecret }}{{ $root.Values.existingSecret }}{{- else }}{{ include "deployment.fullname" $root }}{{- end }}
-                key: {{ $val | quote }}
-            #{{- end }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ if $root.Values.existingSecret }}{{ $root.Values.existingSecret }}{{- else }}{{ include "deployment.fullname" $root }}{{- end }}
+                  key: {{ $val | quote }}
+            {{- end }}
           {{- end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:

@@ -2,19 +2,24 @@ package configs
 
 import (
 	"fmt"
+
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
-	"log"
-	"os"
 )
 
 type Config struct {
-	ServerPort             string `envconfig:"SERVER_PORT" default:"8080"`
-	ServerTimeOutInSeconds int64  `envconfig:"SERVER_TIME_OUT_IN_SECONDS" default:5`
-	WorkerTimeOutInSeconds int64  `envconfig:"WORKER_TIME_OUT_IN_SECONDS" default:15`
-	Database               DatabaseConfig
-	RabbitMQ               RabbitMQConfig
-	RedisConfig            RedisConfig
+	ServerPort               string `envconfig:"SERVER_PORT" default:"8080"`
+	ServerTimeOutInSeconds   int64  `envconfig:"SERVER_TIME_OUT_IN_SECONDS" default:"5"`
+	WorkerTimeOutInSeconds   int64  `envconfig:"WORKER_TIME_OUT_IN_SECONDS" default:"15"`
+	WorkerLockTTLInSeconds   int64  `envconfig:"WORKER_LOCK_TTL_IN_SECONDS" default:"30"`
+	OutboxPollIntervalMs     int64  `envconfig:"OUTBOX_POLL_INTERVAL_MS" default:"500"`
+	OutboxBatchSize          int32  `envconfig:"OUTBOX_BATCH_SIZE" default:"50"`
+	RabbitPrefetchCount      int    `envconfig:"RABBIT_PREFETCH_COUNT" default:"10"`
+	RabbitMaxRetries         int64  `envconfig:"RABBIT_MAX_RETRIES" default:"5"`
+	MetricsEnabled           bool   `envconfig:"METRICS_ENABLED" default:"true"`
+	Database                 DatabaseConfig
+	RabbitMQ                 RabbitMQConfig
+	RedisConfig              RedisConfig
 }
 
 type DatabaseConfig struct {
@@ -37,6 +42,8 @@ type RabbitMQConfig struct {
 	HighPriorityJobsQueueName   string `envconfig:"HIGH_PRIORITY_JOBS_QUEUE_NAME"`
 	LowPriorityJobsQueueName    string `envconfig:"LOW_PRIORITY_JOBS_QUEUE_NAME"`
 	TestJobsQueueName           string `envconfig:"TEST_JOBS_QUEUE_NAME"`
+	DeadLetterExchange          string `envconfig:"RABBIT_DEAD_LETTER_EXCHANGE" default:"jobs.dlx"`
+	DeadLetterQueueName         string `envconfig:"RABBIT_DEAD_LETTER_QUEUE" default:"jobs.dlq"`
 }
 
 type RedisConfig struct {
@@ -130,14 +137,13 @@ func (d RedisConfig) ToRedisConnectionUri() string {
 }
 
 func InitConfig() *Config {
-	err := godotenv.Load()
-
-	if err != nil && !os.IsNotExist(err) {
-		log.Fatalf("Unable to load .env %v", err)
-	}
+	_ = godotenv.Load()
+	_ = godotenv.Load(".env")
+	_ = godotenv.Load("../.env")
+	_ = godotenv.Load("../../.env")
 
 	var cfg Config
-	err = envconfig.Process("", &cfg)
+	err := envconfig.Process("", &cfg)
 	if err != nil {
 		fmt.Print("Cannot load env")
 	}

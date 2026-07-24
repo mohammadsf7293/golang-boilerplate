@@ -28,7 +28,7 @@ build:
 	@CGO_ENABLED=0 go build -v -ldflags="-s -w" -o "$(BUILD_DIR)/$(NAME_QUEUE_RECOVERY)" "$(BUILD_SRC_QUEUE_RECOVERY)"
 test:
 	@echo "$(OK_COLOR)==> Running the unit tests and integration tests $(NO_COLOR)"
-	@godotenv -f .env go test -race -tags unit -cover ./...
+	@godotenv -f .env go test -mod=mod -race -tags unit -cover ./...
 docker:
 	docker build -t task-manager:$(VERSION) .
 	echo "Image is built and tagged as :"task-manager:$(VERSION)

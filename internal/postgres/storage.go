@@ -2,16 +2,17 @@ package postgres
 
 import (
 	"context"
-	"github.com/cenkalti/backoff/v4"
-	"github.com/jackc/pgtype"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
-	"github.com/mohammadsf7293/golang-boilerplate/internal/errval"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"time"
 
-	_ "github.com/cenkalti/backoff/v4"
+	"github.com/cenkalti/backoff/v4"
+	"github.com/google/uuid"
+	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/domain"
+	"github.com/mohammadsf7293/golang-boilerplate/internal/errval"
 )
 
 type storage struct {
@@ -62,8 +63,7 @@ func (s *storage) GetTaskByID(ctx context.Context, ID int32) (*domain.Task, erro
 		return nil, err
 	}
 
-	castedTask := convertTask(task)
-	return castedTask, err
+	return convertTask(task), nil
 }
 
 func (s *storage) GetLimitedTasksByStatus(ctx context.Context, taskStatus string, limit int32) ([]*domain.Task, error) {
@@ -83,8 +83,7 @@ func (s *storage) GetLimitedTasksByStatus(ctx context.Context, taskStatus string
 		return nil, errval.ErrNotFound
 	}
 
-	convertedTasks := convertTasks(tasks)
-	return convertedTasks, nil
+	return convertTasks(tasks), nil
 }
 
 func (s *storage) GetMissedTasks(ctx context.Context, taskStatus string, passedSeconds, limit int32) ([]*domain.Task, error) {
@@ -105,8 +104,7 @@ func (s *storage) GetMissedTasks(ctx context.Context, taskStatus string, passedS
 		return nil, errval.ErrNotFound
 	}
 
-	convertedTasks := convertTasks(tasks)
-	return convertedTasks, nil
+	return convertTasks(tasks), nil
 }
 
 func (s *storage) GetTasksByStatus(ctx context.Context, taskStatus string) ([]*domain.Task, error) {
@@ -123,8 +121,7 @@ func (s *storage) GetTasksByStatus(ctx context.Context, taskStatus string) ([]*d
 		return nil, errval.ErrNotFound
 	}
 
-	convertedTasks := convertTasks(tasks)
-	return convertedTasks, nil
+	return convertTasks(tasks), nil
 }
 
 func (s *storage) GetTaskStatusChangeHistory(ctx context.Context, taskID int32) ([]*domain.TaskStatusChangeHistory, error) {
@@ -141,8 +138,7 @@ func (s *storage) GetTaskStatusChangeHistory(ctx context.Context, taskID int32) 
 		return nil, errval.ErrNotFound
 	}
 
-	convertedTasks := convertTaskStatusChangeHistories(taskStatusChangeHistory)
-	return convertedTasks, nil
+	return convertTaskStatusChangeHistories(taskStatusChangeHistory), nil
 }
 
 func (s *storage) InsertTask(ctx context.Context, name string, taskType, taskStatus, taskPriority, payload string) (task *domain.Task, err error) {
@@ -167,34 +163,102 @@ func (s *storage) InsertTask(ctx context.Context, name string, taskType, taskSta
 	nowStamp := time.Now().UTC().Unix()
 	task = &domain.Task{
 		ID:             taskID,
-		Type:           string(taskType),
+		Type:           taskType,
 		Status:         taskStatus,
+		Priority:       taskPriority,
 		PayLoad:        payload,
 		CreatedAtStamp: nowStamp,
 		UpdatedAtStamp: nowStamp,
 	}
 
-	return task, err
+	return task, nil
 }
 
-func (s *storage) UpdateTaskStatusAndLogChangeInTx(ctx context.Context, taskID int32, currentStatus, newStatus string) (err error) {
+func (s *storage) InsertTaskWithOutbox(ctx context.Context, name string, taskType, taskStatus, taskPriority, payload, queueName string) (*domain.Task, string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	qtx := s.queries.WithTx(tx)
+
+	var payloadJSON pgtype.JSON
+	if err := payloadJSON.Set([]byte(payload)); err != nil {
+		return nil, "", err
+	}
+
+	taskID, err := qtx.InsertTask(ctx, InsertTaskParams{
+		Name:     name,
+		Type:     TaskType(taskType),
+		Status:   TaskStatus(taskStatus),
+		Priority: TaskPriority(taskPriority),
+		Payload:  payloadJSON,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	nowStamp := time.Now().UTC().Unix()
+	task := &domain.Task{
+		ID:             taskID,
+		Type:           taskType,
+		Status:         taskStatus,
+		Priority:       taskPriority,
+		PayLoad:        payload,
+		CreatedAtStamp: nowStamp,
+		UpdatedAtStamp: nowStamp,
+	}
+
+	marshalledTask, err := json.Marshal(task)
+	if err != nil {
+		return nil, "", err
+	}
+
+	messageID := uuid.New()
+	var outboxPayload pgtype.JSONB
+	if err := outboxPayload.Set(marshalledTask); err != nil {
+		return nil, "", err
+	}
+
+	_, err = qtx.InsertOutbox(ctx, InsertOutboxParams{
+		MessageID: messageID,
+		QueueName: queueName,
+		Payload:   outboxPayload,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", err
+	}
+
+	return task, messageID.String(), nil
+}
+
+func (s *storage) UpdateTaskStatusAndLogChangeInTx(ctx context.Context, taskID int32, currentStatus, newStatus string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
 
 	qtx := s.queries.WithTx(tx)
-	err = qtx.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
-		ID:     taskID,
-		Status: TaskStatus(newStatus),
+	rows, err := qtx.UpdateTaskStatusCAS(ctx, UpdateTaskStatusCASParams{
+		Status:   TaskStatus(newStatus),
+		ID:       taskID,
+		Status_2: TaskStatus(currentStatus),
 	})
 	if err != nil {
-		err2 := tx.Rollback(ctx)
-		if err2 != nil {
-			slog.Error("Error occurred while rolling back transaction", "error", err2.Error())
-		}
-
 		return err
+	}
+	if rows == 0 {
+		return errval.ErrConcurrentUpdate
 	}
 
 	err = qtx.InsertTaskStatusChangeHistory(ctx, InsertTaskStatusChangeHistoryParams{
@@ -203,63 +267,197 @@ func (s *storage) UpdateTaskStatusAndLogChangeInTx(ctx context.Context, taskID i
 		NewStatus: TaskStatus(newStatus),
 	})
 	if err != nil {
-		err2 := tx.Rollback(ctx)
-		if err2 != nil {
-			slog.Error("Error occurred while rolling back transaction", "error", err2.Error())
-		}
-
 		return err
 	}
 
 	return tx.Commit(ctx)
 }
 
-func (s *storage) Ping(ctx context.Context) (err error) {
+func (s *storage) UpdateTaskStatusWithInboxInTx(ctx context.Context, taskID int32, currentStatus, newStatus, messageID string) error {
+	parsedMessageID, err := uuid.Parse(messageID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	qtx := s.queries.WithTx(tx)
+	rows, err := qtx.UpdateTaskStatusCAS(ctx, UpdateTaskStatusCASParams{
+		Status:   TaskStatus(newStatus),
+		ID:       taskID,
+		Status_2: TaskStatus(currentStatus),
+	})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errval.ErrConcurrentUpdate
+	}
+
+	err = qtx.InsertTaskStatusChangeHistory(ctx, InsertTaskStatusChangeHistoryParams{
+		TaskID:    taskID,
+		OldStatus: TaskStatus(currentStatus),
+		NewStatus: TaskStatus(newStatus),
+	})
+	if err != nil {
+		return err
+	}
+
+	err = qtx.InsertInbox(ctx, InsertInboxParams{
+		MessageID: parsedMessageID,
+		TaskID:    taskID,
+	})
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (s *storage) IsMessageProcessed(ctx context.Context, messageID string) (bool, error) {
+	parsedMessageID, err := uuid.Parse(messageID)
+	if err != nil {
+		return false, err
+	}
+	return s.queries.IsMessageProcessed(ctx, parsedMessageID)
+}
+
+func (s *storage) RecordInboxMessage(ctx context.Context, messageID string, taskID int32) error {
+	parsedMessageID, err := uuid.Parse(messageID)
+	if err != nil {
+		return err
+	}
+	return s.queries.InsertInbox(ctx, InsertInboxParams{
+		MessageID: parsedMessageID,
+		TaskID:    taskID,
+	})
+}
+
+func (s *storage) GetUnpublishedOutbox(ctx context.Context, limit int32) ([]*domain.OutboxEntry, error) {
+	rows, err := s.queries.GetUnpublishedOutbox(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	entries := make([]*domain.OutboxEntry, 0, len(rows))
+	for _, row := range rows {
+		payload := string(row.Payload.Bytes)
+		if payload == "" && row.Payload.Status == pgtype.Present {
+			b, err := row.Payload.MarshalJSON()
+			if err != nil {
+				return nil, err
+			}
+			payload = string(b)
+		}
+		entries = append(entries, &domain.OutboxEntry{
+			ID:        row.ID,
+			MessageID: row.MessageID.String(),
+			QueueName: row.QueueName,
+			Payload:   payload,
+		})
+	}
+	return entries, nil
+}
+
+func (s *storage) MarkOutboxPublished(ctx context.Context, id int64) error {
+	return s.queries.MarkOutboxPublished(ctx, id)
+}
+
+func (s *storage) EnqueueTaskToOutbox(ctx context.Context, task *domain.Task, queueName string) (string, error) {
+	marshalledTask, err := json.Marshal(task)
+	if err != nil {
+		return "", err
+	}
+
+	messageID := uuid.New()
+	var outboxPayload pgtype.JSONB
+	if err := outboxPayload.Set(marshalledTask); err != nil {
+		return "", err
+	}
+
+	_, err = s.queries.InsertOutbox(ctx, InsertOutboxParams{
+		MessageID: messageID,
+		QueueName: queueName,
+		Payload:   outboxPayload,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return messageID.String(), nil
+}
+
+func (s *storage) ReclaimStaleRunningTasks(ctx context.Context, passedSeconds, limit int32) ([]*domain.Task, error) {
+	tasks, err := s.GetMissedTasks(ctx, string(domain.Running), passedSeconds, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	reclaimed := make([]*domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		err := s.UpdateTaskStatusAndLogChangeInTx(ctx, task.ID, string(domain.Running), string(domain.Queued))
+		if err != nil {
+			if err == errval.ErrConcurrentUpdate {
+				continue
+			}
+			return reclaimed, err
+		}
+		task.Status = string(domain.Queued)
+		reclaimed = append(reclaimed, task)
+	}
+
+	return reclaimed, nil
+}
+
+func (s *storage) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
 func convertTask(task Task) *domain.Task {
-	castedItem := &domain.Task{
+	updatedAt := task.CreatedAt.Time
+	if task.UpdatedAt.Valid {
+		updatedAt = task.UpdatedAt.Time
+	}
+
+	return &domain.Task{
 		ID:             task.ID,
 		Type:           string(task.Type),
 		Status:         string(task.Status),
 		Priority:       string(task.Priority),
 		PayLoad:        string(task.Payload.Bytes),
 		CreatedAtStamp: task.CreatedAt.Time.Unix(),
-		UpdatedAtStamp: task.CreatedAt.Time.Unix(),
+		UpdatedAtStamp: updatedAt.Unix(),
 	}
-
-	return castedItem
 }
 
 func convertTasks(tasks []Task) []*domain.Task {
-	castedTasks := []*domain.Task{}
+	castedTasks := make([]*domain.Task, 0, len(tasks))
 	for _, item := range tasks {
-		castedTask := convertTask(item)
-		castedTasks = append(castedTasks, castedTask)
+		castedTasks = append(castedTasks, convertTask(item))
 	}
-
 	return castedTasks
 }
 
 func convertTaskStatusChangeHistory(item TasksStatusChangeHistory) *domain.TaskStatusChangeHistory {
-	castedItem := &domain.TaskStatusChangeHistory{
+	return &domain.TaskStatusChangeHistory{
 		ID:             item.ID,
 		TaskID:         item.TaskID,
 		OldStatus:      string(item.OldStatus),
 		NewStatus:      string(item.NewStatus),
 		CreatedAtStamp: item.CreatedAt.Time.Unix(),
 	}
-
-	return castedItem
 }
 
 func convertTaskStatusChangeHistories(items []TasksStatusChangeHistory) []*domain.TaskStatusChangeHistory {
-	castedItems := []*domain.TaskStatusChangeHistory{}
+	castedItems := make([]*domain.TaskStatusChangeHistory, 0, len(items))
 	for _, item := range items {
-		castedItem := convertTaskStatusChangeHistory(item)
-		castedItems = append(castedItems, castedItem)
+		castedItems = append(castedItems, convertTaskStatusChangeHistory(item))
 	}
-
 	return castedItems
 }
